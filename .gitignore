@@ -1,0 +1,29 @@
+notepad .gitignore
+```
+
+Paste this exactly, save and close:
+```
+# Virtual environment — never push this
+venv/
+
+# Python compiled files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local database — Railway creates its own
+aquasentinel.db
+
+# Environment variables — secrets stay local
+.env
+
+# Windows system files
+Thumbs.db
+desktop.ini
+
+# VS Code settings
+.vscode/
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
