@@ -10,9 +10,3 @@ COPY . .
 EXPOSE 8000
 
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-Then go to **File → Save As** and set:
-```
-File name:     Dockerfile
-Save as type:  All Files (*.*)
