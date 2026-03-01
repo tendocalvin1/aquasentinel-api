@@ -117,4 +117,16 @@ aquasentinel-api/
 
 ## Author
 
-Tendo Calvin — Software Engineer — Uganda
+## Team
+
+This project was built as a collaborative academic and engineering effort.
+
+| No. | Name | Registration No. | Access No. |
+|-----|------|-----------------|------------|
+| 1 | Ezamamti Ronald Austine | S23B23/018 | B24252 |
+| 2 | Kisa Emmanuel | S23B23/028 | B24259 |
+| 3 | Tendo Calvin | S23B23/013 | B24247 |
+
+**Institution:** Uganda Christian University 
+**Project:** AquaSentinel — AI-Powered Algal Bloom Risk Prediction System  
+**Year:** 2026
