@@ -115,8 +115,6 @@ aquasentinel-api/
     └── feature_columns.pkl
 ```
 
-## Author
-
 ## Team
 
 This project was built as a collaborative academic and engineering effort.
