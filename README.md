@@ -5,7 +5,7 @@
 AquaSentinel is an AI-powered early warning system that predicts algal bloom
 risk in fish ponds using IoT sensor data. Built on a Random Forest model
 trained on 89,283 real sensor readings, it classifies pond conditions into
-three risk levels with 99.9% accuracy.
+three risk levels with 90% accuracy.
 
 ## Live API
 
