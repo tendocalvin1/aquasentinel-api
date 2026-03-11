@@ -2,9 +2,10 @@ import joblib
 import numpy as np
 import pandas as pd
 from pathlib import Path
+from datetime import datetime
 
-BASE_DIR = Path(__file__).parent
-MODEL_DIR = BASE_DIR / "model"
+BASE_DIR     = Path(__file__).parent
+MODEL_DIR    = BASE_DIR / "model"
 
 print("Loading model artifacts...")
 model        = joblib.load(MODEL_DIR / "random_forest_model.pkl")
@@ -13,96 +14,139 @@ feature_cols = joblib.load(MODEL_DIR / "feature_columns.pkl")
 print(f"Model loaded. Expects {len(feature_cols)} features.")
 
 
+def nitrogen_to_ammonia_nitrate(
+    total_nitrogen: float,
+    ph: float
+) -> tuple:
+    """
+    Split Total Nitrogen (mg/kg) into Ammonia and Nitrate fractions.
+
+    In fish pond water, TN is composed of:
+      - Total Ammonia Nitrogen (TAN): 15–25% depending on pH
+      - Nitrate-Nitrogen: ~65%
+      - Organic Nitrogen: remainder (not used by model)
+
+    The ammonia fraction is pH-dependent because un-ionised ammonia
+    (NH3) — the toxic form — dominates at high pH. At low pH, ammonia
+    is mostly ionised (NH4+) and less toxic. This matches Boyd (1998).
+    """
+    if ph > 8.0:
+        ammonia_fraction = 0.25
+    elif ph > 7.5:
+        ammonia_fraction = 0.20
+    else:
+        ammonia_fraction = 0.15
+
+    nitrate_fraction = 0.65
+
+    # mg/kg ÷ 1000 = g/kg ≈ g/ml in dilute aqueous solution
+    ammonia = (total_nitrogen * ammonia_fraction) / 1000.0
+    nitrate  = (total_nitrogen * nitrate_fraction) / 1000.0
+
+    return round(ammonia, 6), round(nitrate, 6)
+
+
 def estimate_dissolved_oxygen(temperature: float, ph: float) -> float:
     """
     Estimate dissolved oxygen from temperature and pH.
-    Based on: warm water holds less O2 (solubility curve),
-    and high pH during blooms indicates active O2 consumption.
 
-    Returns a conservative estimate in g/ml.
+    Uses Henry's Law solubility approximation:
+      DO_sat ≈ 14.62 - 0.3898T + 0.006969T² - 0.0000590T³
+    (APHA Standard Methods for the Examination of Water, 2017)
+
+    pH correction reflects active algal O2 consumption during blooms.
+    High pH = algae actively photosynthesising = O2 depleted at night.
     """
-    # Base DO from temperature (standard solubility curve approximation)
-    # At 20°C → ~9.1 mg/L, at 30°C → ~7.5 mg/L
-    base_do = 14.62 - (0.3898 * temperature) + (0.006969 * temperature ** 2) - (0.00005896 * temperature ** 3)
+    base_do = (14.62
+               - (0.3898  * temperature)
+               + (0.006969 * temperature ** 2)
+               - (0.00005896 * temperature ** 3))
 
-    # pH correction: high pH (active bloom) means O2 is being consumed fast
-    # pH above 8.0 → reduce estimated DO
     if ph > 8.5:
-        base_do *= 0.55   # severe bloom → very low DO
+        base_do *= 0.55
     elif ph > 8.0:
-        base_do *= 0.70   # active bloom → reduced DO
+        base_do *= 0.70
     elif ph > 7.5:
-        base_do *= 0.85   # mild concern → slightly reduced
-    # below 7.5 → no correction, pond chemistry normal
+        base_do *= 0.85
 
-    # Convert mg/L to g/ml (1 mg/L = 0.001 g/L = 0.001 g/ml)
-    return round(max(base_do * 0.001, 0.001), 5)
+    # mg/L → g/ml
+    return round(max(base_do * 0.001, 0.001), 6)
+
+
+def get_temporal_context() -> dict:
+    """Auto-fill temporal features from system clock."""
+    now = datetime.now()
+    month = now.month
+    # Uganda: June–September = Dry (0), all other months = Wet (1)
+    season = 0 if month in [6, 7, 8, 9] else 1
+    return {
+        'hour':        now.hour,
+        'month':       month,
+        'day_of_week': now.weekday(),
+        'season':      season,
+    }
 
 
 def predict_bloom_risk(
-    # ── Your actual hardware parameters ──────────────────────
-    nitrogen:    float,        # mg/kg  from RS485 Multi-Probe
-    ec:          float,        # µS/cm  from RS485 Multi-Probe
-    ph:          float,        # pH     from RS485 Multi-Probe
-    temperature: float,        # °C     from RS485 + DS18B20
-    turbidity_high: bool,      # True=High, False=Low from GPIO
-    # ── Optional — pass if you add a DO sensor later ─────────
-    dissolved_oxygen: float = None,
-    # ── Temporal context (auto-filled from system clock) ─────
-    hour:        int = 12,
-    month:       int = 6,
-    day_of_week: int = 2,
-    season:      int = 0
+    # ── Hardware parameters (exactly what your sensors give you) ──
+    total_nitrogen:   float,          # mg/kg  — RS485 Multi-Probe
+    ec:               float,          # µS/cm  — RS485 Multi-Probe
+    ph:               float,          # pH     — RS485 Multi-Probe
+    temperature:      float,          # °C     — RS485 + DS18B20
+    turbidity_high:   bool,           # True/False — GPIO Digital Sensor
+    # ── Optional: pass real value when you add a DO sensor ────────
+    dissolved_oxygen: float = None,   # g/ml   — future hardware
 ) -> dict:
 
-    # ── SENSOR CONVERSIONS ────────────────────────────────────
-    # Nitrogen (mg/kg) → Ammonia (g/ml)
-    ammonia = nitrogen / 1000.0
+    # ── STEP 1: Auto-fill time from system clock ──────────────
+    time_ctx = get_temporal_context()
 
-    # EC (µS/cm) → Nitrate (g/ml)
-    # Standard pond water conversion: EC × 0.7 = nitrate in mg/L
-    # then mg/L ÷ 1000 = g/ml
-    nitrate = (ec * 0.7) / 1000.0
+    # ── STEP 2: Convert hardware readings to model inputs ─────
 
-    # Turbidity: Digital High/Low → NTU approximation
-    # High signal = turbid/bloom-risk water = 100 NTU
-    # Low signal  = clear water             = 20 NTU
+    # Total Nitrogen → Ammonia + Nitrate (pH-adjusted fractions)
+    ammonia, nitrate = nitrogen_to_ammonia_nitrate(total_nitrogen, ph)
+
+    # EC (µS/cm) → Nitrate refinement
+    # EC gives us an independent nitrate estimate to cross-check.
+    # Standard pond water: nitrate_mg/L ≈ EC_µS/cm × 0.7
+    # We blend both estimates: 60% TN-derived, 40% EC-derived
+    nitrate_from_ec = (ec * 0.7) / 1000.0
+    nitrate = round((nitrate * 0.60) + (nitrate_from_ec * 0.40), 6)
+
+    # Turbidity: Digital → NTU proxy
     turbidity = 100.0 if turbidity_high else 20.0
 
-    # Dissolved Oxygen: use sensor if available, else estimate
-    if dissolved_oxygen is None:
+    # DO: real sensor takes priority, otherwise estimate
+    do_was_estimated = dissolved_oxygen is None
+    if do_was_estimated:
         dissolved_oxygen = estimate_dissolved_oxygen(temperature, ph)
 
-    # ── FEATURE CONSTRUCTION ──────────────────────────────────
+    # ── STEP 3: Build all 21 features ────────────────────────
     raw = {
-        'Temperature(C)':         temperature,
-        'Turbidity(NTU)':         turbidity,
-        'PH':                     ph,
-        'Ammonia(g/ml)':          ammonia,
-        'Nitrate(g/ml)':          nitrate,
-        'Dissolved Oxygen(g/ml)': dissolved_oxygen,
-        'hour':                   hour,
-        'month':                  month,
-        'day_of_week':            day_of_week,
-        'season':                 season,
-        # Rolling features — use current reading as proxy
-        # (in production, pass the last 6 readings' average here)
-        'ammonia_rolling_mean':   ammonia,
-        'nitrate_rolling_mean':   nitrate,
-        'temp_rolling_mean':      temperature,
-        'ammonia_rolling_std':    0.0,
-        'nitrate_rolling_std':    0.0,
-        # Log transforms
-        'ammonia_log':            np.log1p(ammonia),
-        'nitrate_log':            np.log1p(nitrate),
-        # Spike flag — ammonia > 10 g/ml threshold
-        'ammonia_spike':          1 if ammonia > 10 else 0,
-        # Interaction features
+        'Temperature(C)':           temperature,
+        'Turbidity(NTU)':           turbidity,
+        'PH':                       ph,
+        'Ammonia(g/ml)':            ammonia,
+        'Nitrate(g/ml)':            nitrate,
+        'Dissolved Oxygen(g/ml)':   dissolved_oxygen,
+        'hour':                     time_ctx['hour'],
+        'month':                    time_ctx['month'],
+        'day_of_week':              time_ctx['day_of_week'],
+        'season':                   time_ctx['season'],
+        'ammonia_rolling_mean':     ammonia,
+        'nitrate_rolling_mean':     nitrate,
+        'temp_rolling_mean':        temperature,
+        'ammonia_rolling_std':      0.0,
+        'nitrate_rolling_std':      0.0,
+        'ammonia_log':              np.log1p(ammonia),
+        'nitrate_log':              np.log1p(nitrate),
+        'ammonia_spike':            1 if ammonia > 10 else 0,
         'nitrate_ph_interaction':   nitrate * ph,
         'ammonia_ph_interaction':   ammonia * ph,
         'temp_nitrate_interaction': temperature * nitrate,
     }
 
+    # ── STEP 4: Scale and predict ─────────────────────────────
     input_df     = pd.DataFrame([raw])[feature_cols]
     input_scaled = scaler.transform(input_df)
 
@@ -146,22 +190,25 @@ def predict_bloom_risk(
             'medium_risk': round(float(probabilities[1] * 100), 2),
             'high_risk':   round(float(probabilities[2] * 100), 2)
         },
-        # What the model actually received (after conversion)
         'model_inputs': {
-            'ammonia':          round(ammonia, 5),
-            'nitrate':          round(nitrate, 5),
+            'ammonia':          ammonia,
+            'nitrate':          nitrate,
             'ph':               ph,
             'temperature':      temperature,
             'turbidity':        turbidity,
-            'dissolved_oxygen': round(dissolved_oxygen, 5),
+            'dissolved_oxygen': dissolved_oxygen,
         },
-        # Raw hardware readings (for logging/debugging)
         'hardware_inputs': {
-            'nitrogen_mg_kg':    nitrogen,
-            'ec_us_cm':          ec,
-            'ph':                ph,
-            'temperature_c':     temperature,
-            'turbidity_digital': 'HIGH' if turbidity_high else 'LOW',
+            'total_nitrogen_mg_kg': total_nitrogen,
+            'ec_us_cm':             ec,
+            'ph':                   ph,
+            'temperature_c':        temperature,
+            'turbidity_digital':    'HIGH' if turbidity_high else 'LOW',
         },
-        'do_estimated': dissolved_oxygen is None
+        'data_quality': {
+            'do_estimated':         do_was_estimated,
+            'nitrogen_split_method':'pH-adjusted TN fractionation (Boyd 1998)',
+            'turbidity_method':     'digital proxy (High=100 NTU, Low=20 NTU)',
+            'temporal_auto_filled': True,
+        }
     }
