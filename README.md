@@ -55,7 +55,7 @@ The API accepts raw hardware sensor values and handles all unit conversion inter
 
 `POST /api/predict`
 
-The request body accepts your **actual hardware sensor parameters** directly. The API converts them internally to the 21 features the model expects.
+The request body accepts our **actual hardware sensor parameters** directly. The API converts them internally to the 21 features the model expects.
 
 ```json
 {
@@ -143,7 +143,7 @@ The request body accepts your **actual hardware sensor parameters** directly. Th
 
 ## Hardware Conversion Layer
 
-The API bridges the gap between what our RS485 Multi-Probe measures and what the Random Forest model was trained on:
+The API bridges a gap between what our RS485 Multi-Probe measures and what the Random Forest model was trained on:
 
 | Hardware Measurement | Conversion Method | Reference |
 |---------------------|------------------|-----------|
