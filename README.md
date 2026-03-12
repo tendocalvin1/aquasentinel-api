@@ -12,7 +12,7 @@ AquaSentinel is an AI-powered early warning system that predicts algal bloom ris
 |---|---|
 | **Base URL** | https://aquasentinel-api-production.up.railway.app |
 | **Interactive Docs** | https://aquasentinel-api-production.up.railway.app/docs |
-| **Version** | 2.0.0 |
+| **Version** | 2.1.0 |
 | **Status** | 🟢 Online |
 
 ---
@@ -29,9 +29,9 @@ Algal blooms are the leading cause of fish stock loss in East African aquacultur
 IoT Hardware (RS485 Multi-Probe + DS18B20 + GPIO)
         ↓  sends 7 sensor readings every 5 minutes
 AquaSentinel API (FastAPI on Railway)
-        ↓  converts hardware readings to 21 model features
+        ↓  validates inputs, converts hardware readings to 21 model features
 Random Forest Model (trained on 89,283 real pond readings)
-        ↓  classifies bloom risk
+        ↓  classifies bloom risk, persists result to SQLite
 Pond Manager receives LOW / MEDIUM / HIGH RISK alert + recommended action
 ```
 
@@ -46,8 +46,8 @@ The API accepts raw hardware sensor values and handles all unit conversion inter
 | `GET` | `/` | System status and version |
 | `GET` | `/api/health` | Model health check — confirms 21 features loaded |
 | `POST` | `/api/predict` | **Main endpoint** — predict bloom risk from sensor readings |
-| `GET` | `/api/history` | Last 50 predictions with timestamps |
-| `GET` | `/api/stats` | Aggregated risk level counts |
+| `GET` | `/api/history` | Last 50 predictions with timestamps (persisted to SQLite) |
+| `GET` | `/api/stats` | Aggregated risk level counts (persisted to SQLite) |
 
 ---
 
@@ -55,7 +55,7 @@ The API accepts raw hardware sensor values and handles all unit conversion inter
 
 `POST /api/predict`
 
-The request body accepts our **actual hardware sensor parameters** directly. The API converts them internally to the 21 features the model expects.
+The request body accepts our **actual hardware sensor parameters** directly. The API validates bounds, then converts them internally to the 21 features the model expects.
 
 ```json
 {
@@ -71,16 +71,18 @@ The request body accepts our **actual hardware sensor parameters** directly. The
 
 ### Parameter Reference
 
-| Parameter | Unit | Source | Required |
-|-----------|------|--------|----------|
-| `total_nitrogen` | mg/kg | RS485 Multi-Probe | ✅ |
-| `ec` | µS/cm | RS485 Multi-Probe | ✅ |
-| `ph` | pH (0–14) | RS485 Multi-Probe | ✅ |
-| `temperature` | °C | RS485 + DS18B20 | ✅ |
-| `turbidity_high` | boolean | GPIO Digital Sensor | ✅ |
-| `phosphorus` | mg/kg | RS485 Multi-Probe | Optional (logged) |
-| `potassium` | mg/kg | RS485 Multi-Probe | Optional (logged) |
-| `dissolved_oxygen` | g/ml | Future DO sensor | Optional (estimated if absent) |
+| Parameter | Unit | Valid Range | Source | Required |
+|-----------|------|------------|--------|----------|
+| `total_nitrogen` | mg/kg | 0 – 2000 | RS485 Multi-Probe | ✅ |
+| `ec` | µS/cm | 0 – 8000 | RS485 Multi-Probe | ✅ |
+| `ph` | pH | 0 – 14 | RS485 Multi-Probe | ✅ |
+| `temperature` | °C | 10 – 40 | RS485 + DS18B20 | ✅ |
+| `turbidity_high` | boolean | true / false | GPIO Digital Sensor | ✅ |
+| `phosphorus` | mg/kg | 0 – 1000 | RS485 Multi-Probe | Optional (logged) |
+| `potassium` | mg/kg | 0 – 1000 | RS485 Multi-Probe | Optional (logged) |
+| `dissolved_oxygen` | g/ml | 0 – 50 | Future DO sensor | Optional (estimated if absent) |
+
+> Values outside the valid range are clamped to the nearest bound. A warning is returned in the `validation` block of the response. Values that violate the physical maximum (e.g. `ph > 14`) are rejected at the HTTP layer with a `422` error before reaching the model.
 
 ---
 
@@ -92,12 +94,12 @@ The request body accepts our **actual hardware sensor parameters** directly. The
   "risk_label": "MEDIUM RISK",
   "icon": "yellow",
   "severity": "medium",
-  "confidence": 39.32,
+  "confidence": 38.2,
   "action": "Elevated risk detected. Increase aeration and reduce feeding by 30%. Test water manually. Monitor every 30 minutes.",
   "probabilities": {
-    "low_risk": 24.85,
-    "medium_risk": 39.32,
-    "high_risk": 35.83
+    "low_risk": 28.85,
+    "medium_risk": 38.2,
+    "high_risk": 32.95
   },
   "model_inputs": {
     "ammonia_g_ml": 0.00675,
@@ -123,6 +125,11 @@ The request body accepts our **actual hardware sensor parameters** directly. The
     "turbidity_source": "digital proxy (High=100 NTU, Low=20 NTU)",
     "rolling_window_size": 1,
     "rolling_std_active": false
+  },
+  "validation": {
+    "inputs_valid": true,
+    "warnings": [],
+    "values_clamped": false
   }
 }
 ```
@@ -137,13 +144,31 @@ The request body accepts our **actual hardware sensor parameters** directly. The
 | `1` | 🟡 MEDIUM RISK | Elevated nutrient or pH readings | Increase aeration, reduce feeding by 30%, monitor every 30 minutes. |
 | `2` | 🔴 HIGH RISK | Critical parameter threshold exceeded | **Immediate intervention.** Stop feeding, maximum aeration, consider 20% water exchange. Alert pond manager now. |
 
-> **Note on confidence:** Low confidence (e.g. 39%) does not indicate a system fault — it means pond parameters are genuinely borderline and the model is reporting honest uncertainty. A pond with mixed signals (low nitrogen but elevated EC) will correctly produce a split probability distribution.
+> **Note on confidence:** Low confidence (e.g. 38%) does not indicate a system fault — it means pond parameters are genuinely borderline and the model is reporting honest uncertainty. A pond with mixed signals (low nitrogen but elevated EC) will correctly produce a split probability distribution.
+
+---
+
+## Input Validation
+
+Every request is validated before it reaches the model. Parameters outside physical bounds are clamped and flagged transparently:
+
+```json
+{
+  "validation": {
+    "inputs_valid": false,
+    "warnings": ["ph=99.0 is outside expected range [0.0, 14.0]. Clamped to 14.0."],
+    "values_clamped": true
+  }
+}
+```
+
+Physically impossible values (e.g. `ph > 14`) are rejected at the HTTP layer with a `422 Unprocessable Entity` response before they reach the model at all.
 
 ---
 
 ## Hardware Conversion Layer
 
-The API bridges a gap between what our RS485 Multi-Probe measures and what the Random Forest model was trained on:
+The API bridges the gap between what our RS485 Multi-Probe measures and what the Random Forest model was trained on:
 
 | Hardware Measurement | Conversion Method | Reference |
 |---------------------|------------------|-----------|
@@ -254,7 +279,7 @@ Interactive docs at `http://localhost:8000/docs`
 | ML Model | Random Forest — scikit-learn 1.6.1 |
 | API Framework | FastAPI 0.110.0 |
 | Server | Uvicorn |
-| Database | SQLite via SQLAlchemy |
+| Database | SQLite via SQLAlchemy — persists predictions across restarts |
 | Deployment | Railway via Docker |
 | Version Control | GitHub |
 | Hardware | RS485 Multi-Probe, DS18B20 temperature sensor, GPIO digital turbidity sensor |
@@ -265,9 +290,9 @@ Interactive docs at `http://localhost:8000/docs`
 
 ```
 aquasentinel-api/
-├── main.py              # FastAPI app — endpoints and request/response models
+├── main.py              # FastAPI app — endpoints, input validation, request/response models
 ├── predict.py           # Hardware conversion layer + Random Forest inference
-├── database.py          # SQLAlchemy models and prediction logging
+├── database.py          # SQLAlchemy models, prediction logging, history queries
 ├── requirements.txt
 ├── Dockerfile
 └── model/
@@ -300,6 +325,31 @@ async function predictBloomRisk(sensorData) {
   return response.data;
 }
 ```
+
+---
+
+## Changelog
+
+### v2.1.0 — Current
+- `database.py` connected — every prediction now persists to SQLite and survives container restarts
+- Input validation added — all parameters have enforced bounds; out-of-range values are clamped with warnings returned in the `validation` block of every response
+- `AMMONIA_SPIKE_THRESHOLD` corrected to `23.8816` — exact p75 of Ammonia calculated from the IoTPond6 training set (was previously hardcoded as `10.08`)
+- Rolling buffers seeded from database on startup — `rolling_std_active` is `true` immediately after a restart instead of waiting for 6 new readings
+- Error messages sanitised — internal file paths and stack traces never exposed to API callers
+- Structured logging added throughout `predict.py` and `main.py`
+- `validation` block added to every `/api/predict` response
+- Phosphorus and Potassium now stored in every database row — accumulating as the future model v2 training dataset
+
+### v2.0.0
+- Hardware-aligned parameters — API now accepts RS485 hardware inputs directly
+- Hardware conversion layer introduced — TN→Ammonia, EC→Nitrate, DO estimation
+- Rolling window deque buffers replaced static `0.0` placeholders
+- `data_quality` transparency block added to every response
+
+### v1.0.0
+- Initial deployment — direct sensor parameter inputs (ammonia, nitrate, DO)
+- Random Forest model trained on 89,283 IoTPond6 readings
+- Three risk levels: LOW / MEDIUM / HIGH
 
 ---
 
