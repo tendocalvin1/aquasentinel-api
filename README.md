@@ -143,7 +143,7 @@ The request body accepts your **actual hardware sensor parameters** directly. Th
 
 ## Hardware Conversion Layer
 
-The API bridges the gap between what your RS485 Multi-Probe measures and what the Random Forest model was trained on:
+The API bridges the gap between what our RS485 Multi-Probe measures and what the Random Forest model was trained on:
 
 | Hardware Measurement | Conversion Method | Reference |
 |---------------------|------------------|-----------|
