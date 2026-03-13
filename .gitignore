@@ -26,4 +26,7 @@ desktop.ini
 .vscode/
 
 # Jupyter notebook checkpoints
-.ipynb_checkpoints/
+.ipynb_checkpoints/aquasentinel.db 
+IoTPond6.csv 
+*.pyc 
+venv/ 
