@@ -1,17 +1,15 @@
 """
-AquaSentinel API — main.py  (v2.1.0)
-======================================
-Hardware-aligned FastAPI endpoint for the fish pond management system.
+AquaSentinel API — main.py  (v3.0.0)
+=====================================
+Water Quality Assessment API — FastAPI on Railway
 
-CHANGES IN v2.1.0:
-    - database.py connected — predictions now persist to SQLite across restarts
-    - Field bounds added to SensorReading — rejects physically impossible inputs
-    - model and feature_cols imported at top level — health endpoint no longer
-      re-imports on every request
-    - Error messages sanitised — internal paths no longer exposed to callers
-    - Startup event seeds rolling buffers from last 6 DB records after restart
-    - Structured logging added throughout
-    - /api/history and /api/stats now read from database, not in-memory list
+CHANGES IN v3.0.0:
+    - Complete rewrite — water quality assessment replaces bloom risk
+    - SensorReading accepts 4 hardware parameters: temperature, ph, nitrite, phosphorus
+    - Response returns quality_level (0/1/2), quality_label (Excellent/Good/Poor)
+    - No hardware conversion layer — RS485 measures what model expects directly
+    - Database updated — stores water quality labels instead of risk levels
+    - All endpoint descriptions updated to reflect water quality context
 """
 
 import logging
@@ -19,13 +17,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
 import uvicorn
 
-from predict import predict_bloom_risk, seed_rolling_buffers, model, feature_cols
+from predict import predict_water_quality, model, feature_cols
 from database import (
     Base, engine, SessionLocal,
-    save_prediction, get_history, get_stats, get_last_n_model_inputs,
+    save_prediction, get_history, get_stats,
 )
 
 # ── Logging ───────────────────────────────────────────────────────────────
@@ -43,11 +41,11 @@ logger.info("Database tables ready.")
 app = FastAPI(
     title="AquaSentinel API",
     description=(
-        "Real-time algal bloom risk prediction for fish pond monitoring. "
-        "Accepts RS485 Multi-Probe + DS18B20 + GPIO sensor readings and "
-        "returns LOW / MEDIUM / HIGH risk classification."
+        "Real-time water quality assessment for fish pond monitoring. "
+        "Accepts RS485 Multi-Probe + DS18B20 sensor readings and "
+        "returns Excellent / Good / Poor water quality classification."
     ),
-    version="2.1.0",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -58,81 +56,39 @@ app.add_middleware(
 )
 
 
-# ── Startup: seed rolling buffers from DB ────────────────────────────────
-@app.on_event("startup")
-def on_startup():
-    """
-    On every container start / Railway redeploy, restore the last 6
-    ammonia / nitrate / temperature readings from the database so that
-    rolling_std_active is True immediately rather than after 6 new readings.
-    """
-    try:
-        last_six = get_last_n_model_inputs(6)
-        if last_six:
-            seed_rolling_buffers(last_six)
-            logger.info("Rolling buffers seeded from DB (%d records).", len(last_six))
-        else:
-            logger.info("No DB history found — rolling buffers start empty.")
-    except Exception as e:
-        # Non-fatal — app still runs, buffers just start empty
-        logger.warning("Could not seed rolling buffers: %s", e)
-
-
 # ═══════════════════════════════════════════════════════════════════════════
-# REQUEST MODEL — matches your exact hardware parameters with bounds
+# REQUEST MODEL
 # ═══════════════════════════════════════════════════════════════════════════
 
 class SensorReading(BaseModel):
-    # ── RS485 Multi-Probe ─────────────────────────────────────────────
-    total_nitrogen: float = Field(
+    """
+    Four sensor readings from the RS485 Multi-Probe + DS18B20 hardware.
+    These are the exact four parameters the model was trained on —
+    no unit conversion is needed.
+    """
+    temperature: float = Field(
         ...,
-        ge=0.0, le=2000.0,
-        description="Total Nitrogen in mg/kg",
-        example=45.0,
-    )
-    ec: float = Field(
-        ...,
-        ge=0.0, le=8000.0,
-        description="Electrical Conductivity in µS/cm",
-        example=850.0,
+        ge=0.0, le=50.0,
+        description="Water temperature in °C (DS18B20 / RS485)",
+        example=25.0,
     )
     ph: float = Field(
         ...,
         ge=0.0, le=14.0,
-        description="pH value 0–14",
-        example=7.4,
+        description="pH value 0–14 (RS485 pH probe)",
+        example=7.2,
+    )
+    nitrite: float = Field(
+        ...,
+        ge=0.0, le=20.0,
+        description="Nitrite concentration in mg/L (RS485)",
+        example=0.1,
     )
     phosphorus: float = Field(
-        0.0,
-        ge=0.0, le=1000.0,
-        description="Phosphorus in mg/kg (logged for future model)",
-        example=12.0,
-    )
-    potassium: float = Field(
-        0.0,
-        ge=0.0, le=1000.0,
-        description="Potassium in mg/kg (logged for future model)",
-        example=8.0,
-    )
-    # ── DS18B20 temperature sensor ────────────────────────────────────
-    temperature: float = Field(
         ...,
-        ge=10.0, le=40.0,
-        description="Water temperature in °C",
-        example=26.5,
-    )
-    # ── GPIO digital turbidity sensor ────────────────────────────────
-    turbidity_high: bool = Field(
-        ...,
-        description="True = turbidity HIGH (cloudy), False = LOW (clear)",
-        example=False,
-    )
-    # ── Optional DO sensor (add when hardware is available) ───────────
-    dissolved_oxygen: Optional[float] = Field(
-        None,
-        ge=0.0, le=50.0,
-        description="Dissolved Oxygen in g/ml — estimated if not provided",
-        example=None,
+        ge=0.0, le=20.0,
+        description="Phosphorus concentration in mg/L (RS485)",
+        example=0.05,
     )
 
 
@@ -143,50 +99,54 @@ class SensorReading(BaseModel):
 @app.get("/")
 def root():
     return {
-        "system":   "AquaSentinel",
-        "status":   "online",
-        "version":  "2.1.0",
-        "hardware": "RS485 Multi-Probe + DS18B20 + GPIO Turbidity",
+        "system":      "AquaSentinel",
+        "description": "Fish Pond Water Quality Assessment",
+        "status":      "online",
+        "version":     "3.0.0",
+        "model":       "Random Forest — AWD Dataset (3,887 samples)",
+        "hardware":    "RS485 Multi-Probe + DS18B20",
+        "labels":      {
+            "0": "Excellent",
+            "1": "Good",
+            "2": "Poor",
+        },
     }
 
 
 @app.get("/api/health")
 def health():
     """
-    Model health check. Confirms the Random Forest is loaded and
-    reports how many features it expects.
-    model and feature_cols are imported at the top of this file —
-    no re-import on every request.
+    Model health check.
+    Confirms the Random Forest is loaded and reports feature count.
     """
     return {
-        "status":    "healthy",
-        "model":     "Random Forest",
-        "features":  len(feature_cols),
-        "timestamp": datetime.now().isoformat(),
+        "status":           "healthy",
+        "model":            "Random Forest — Water Quality",
+        "features":         len(feature_cols),
+        "feature_list":     feature_cols,
+        "labels":           ["Excellent", "Good", "Poor"],
+        "model_accuracy":   "85.5%",
+        "timestamp":        datetime.now().isoformat(),
     }
 
 
 @app.post("/api/predict")
 def predict(reading: SensorReading):
     """
-    Main prediction endpoint.
+    Main prediction endpoint — Water Quality Assessment.
 
-    Accepts your hardware sensor readings, converts them to the 21 model
-    features, runs the Random Forest, and returns a complete risk assessment.
+    Accepts four RS485 sensor readings and returns a complete
+    water quality assessment: Excellent, Good, or Poor.
 
-    Error messages are sanitised — internal file paths and stack traces
-    are logged server-side but never returned to the caller.
+    No unit conversion required — the RS485 Multi-Probe measures
+    exactly the parameters the model was trained on.
     """
     try:
-        result = predict_bloom_risk(
-            total_nitrogen   = reading.total_nitrogen,
-            ec               = reading.ec,
-            ph               = reading.ph,
-            temperature      = reading.temperature,
-            turbidity_high   = reading.turbidity_high,
-            phosphorus       = reading.phosphorus,
-            potassium        = reading.potassium,
-            dissolved_oxygen = reading.dissolved_oxygen,
+        result = predict_water_quality(
+            temperature=reading.temperature,
+            ph=reading.ph,
+            nitrite=reading.nitrite,
+            phosphorus=reading.phosphorus,
         )
 
         # ── Persist to database ──────────────────────────────────────────
@@ -194,7 +154,6 @@ def predict(reading: SensorReading):
         try:
             save_prediction(db, reading=reading.dict(), result=result)
         except Exception as db_err:
-            # Non-fatal — return the prediction even if DB write fails
             logger.error("DB write failed: %s", db_err)
         finally:
             db.close()
@@ -202,9 +161,7 @@ def predict(reading: SensorReading):
         return result
 
     except Exception as e:
-        # Log full detail server-side for debugging
         logger.error("Prediction error: %s", e, exc_info=True)
-        # Return a clean message — never expose internals to the caller
         raise HTTPException(
             status_code=500,
             detail="Prediction failed. Please check your sensor input values.",
@@ -214,13 +171,13 @@ def predict(reading: SensorReading):
 @app.get("/api/history")
 def history(limit: int = 50):
     """
-    Returns the last N predictions from the database.
-    Data persists across restarts — reads from SQLite, not memory.
+    Returns the last N water quality assessments from the database.
+    Persists across container restarts.
     """
     db = SessionLocal()
     try:
         records = get_history(db, limit=limit)
-        return {"count": len(records), "predictions": records}
+        return {"count": len(records), "assessments": records}
     except Exception as e:
         logger.error("History query failed: %s", e)
         raise HTTPException(status_code=500, detail="Could not retrieve history.")
@@ -231,8 +188,8 @@ def history(limit: int = 50):
 @app.get("/api/stats")
 def stats():
     """
-    Returns aggregated risk level counts from the database.
-    Data persists across restarts — reads from SQLite, not memory.
+    Returns aggregated water quality counts from the database.
+    Persists across container restarts.
     """
     db = SessionLocal()
     try:

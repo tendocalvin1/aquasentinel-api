@@ -1,8 +1,8 @@
 # AquaSentinel API
 
-> Real-time algal bloom risk prediction for aquaculture pond monitoring — powered by IoT sensors and Machine Learning.
+> Real-time water quality assessment for aquaculture pond monitoring — powered by IoT sensors and Machine Learning.
 
-AquaSentinel is an AI-powered early warning system that predicts algal bloom risk in fish ponds using real IoT sensor data. Built on a Random Forest model trained on 89,283 real sensor readings from a monitored aquaculture pond, it classifies pond conditions into three risk levels with **97% accuracy** and a **0.97 High Risk Recall** — meaning it catches 97 out of every 100 genuine bloom emergencies.
+AquaSentinel is an AI-powered system that assesses water quality in fish ponds using real IoT sensor data. Built on a Random Forest model trained on 3,887 samples from the Aquaculture Water Quality Dataset (AWD), it classifies pond water into three quality levels with **85.5% accuracy** and **100% Poor Precision** — meaning every POOR alert is a genuine water quality problem, with zero false alarms.
 
 ---
 
@@ -12,30 +12,30 @@ AquaSentinel is an AI-powered early warning system that predicts algal bloom ris
 |---|---|
 | **Base URL** | https://aquasentinel-api-production.up.railway.app |
 | **Interactive Docs** | https://aquasentinel-api-production.up.railway.app/docs |
-| **Version** | 2.1.0 |
+| **Version** | 3.0.0 |
 | **Status** | 🟢 Online |
 
 ---
 
 ## The Problem
 
-Algal blooms are the leading cause of fish stock loss in East African aquaculture ponds. Farms lose up to 40% of annual stock to overnight water quality crashes that could have been prevented with early detection. No affordable, automated early-warning system existed for smallholder fish farmers in Uganda — AquaSentinel was built to solve that.
+Poor water quality is the leading cause of fish stock loss in East African aquaculture ponds. Elevated Nitrite and Phosphorus, combined with thermal stress and pH imbalance, create conditions that kill fish overnight. No affordable, automated water quality monitoring system existed for smallholder fish farmers in Uganda — AquaSentinel was built to solve that.
 
 ---
 
 ## How It Works
 
 ```
-IoT Hardware (RS485 Multi-Probe + DS18B20 + GPIO)
-        ↓  sends 7 sensor readings every 5 minutes
+RS485 Multi-Probe + DS18B20 (4 sensor readings)
+        ↓
 AquaSentinel API (FastAPI on Railway)
-        ↓  validates inputs, converts hardware readings to 21 model features
-Random Forest Model (trained on 89,283 real pond readings)
-        ↓  classifies bloom risk, persists result to SQLite
-Pond Manager receives LOW / MEDIUM / HIGH RISK alert + recommended action
+        ↓  engineers 10 features from 4 raw readings
+Random Forest Model (trained on 3,887 aquaculture samples)
+        ↓
+Pond Manager receives EXCELLENT / GOOD / POOR + recommended action
 ```
 
-The API accepts raw hardware sensor values and handles all unit conversion internally — including pH-adjusted Total Nitrogen fractionation (Boyd 1998), EC-to-Nitrate ionic conversion (Rhoades 1989), and Dissolved Oxygen estimation via Henry's Law solubility (APHA 2017).
+The four hardware parameters map **directly** to what the model was trained on — no unit conversion layer is needed.
 
 ---
 
@@ -43,11 +43,11 @@ The API accepts raw hardware sensor values and handles all unit conversion inter
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| `GET` | `/` | System status and version |
-| `GET` | `/api/health` | Model health check — confirms 21 features loaded |
-| `POST` | `/api/predict` | **Main endpoint** — predict bloom risk from sensor readings |
-| `GET` | `/api/history` | Last 50 predictions with timestamps (persisted to SQLite) |
-| `GET` | `/api/stats` | Aggregated risk level counts (persisted to SQLite) |
+| `GET`  | `/` | System status and version |
+| `GET`  | `/api/health` | Model health check — feature list and accuracy |
+| `POST` | `/api/predict` | **Main endpoint** — assess water quality from sensor readings |
+| `GET`  | `/api/history` | Last 50 assessments with timestamps (persisted to SQLite) |
+| `GET`  | `/api/stats` | Aggregated quality level counts |
 
 ---
 
@@ -55,34 +55,23 @@ The API accepts raw hardware sensor values and handles all unit conversion inter
 
 `POST /api/predict`
 
-The request body accepts our **actual hardware sensor parameters** directly. The API validates bounds, then converts them internally to the 21 features the model expects.
-
 ```json
 {
-  "total_nitrogen": 45.0,
-  "ec": 850.0,
-  "ph": 7.4,
-  "temperature": 26.5,
-  "turbidity_high": false,
-  "phosphorus": 12.0,
-  "potassium": 8.0
+  "temperature": 25.0,
+  "ph": 7.2,
+  "nitrite": 0.1,
+  "phosphorus": 0.05
 }
 ```
 
 ### Parameter Reference
 
-| Parameter | Unit | Valid Range | Source | Required |
-|-----------|------|------------|--------|----------|
-| `total_nitrogen` | mg/kg | 0 – 2000 | RS485 Multi-Probe | ✅ |
-| `ec` | µS/cm | 0 – 8000 | RS485 Multi-Probe | ✅ |
-| `ph` | pH | 0 – 14 | RS485 Multi-Probe | ✅ |
-| `temperature` | °C | 10 – 40 | RS485 + DS18B20 | ✅ |
-| `turbidity_high` | boolean | true / false | GPIO Digital Sensor | ✅ |
-| `phosphorus` | mg/kg | 0 – 1000 | RS485 Multi-Probe | Optional (logged) |
-| `potassium` | mg/kg | 0 – 1000 | RS485 Multi-Probe | Optional (logged) |
-| `dissolved_oxygen` | g/ml | 0 – 50 | Future DO sensor | Optional (estimated if absent) |
-
-> Values outside the valid range are clamped to the nearest bound. A warning is returned in the `validation` block of the response. Values that violate the physical maximum (e.g. `ph > 14`) are rejected at the HTTP layer with a `422` error before reaching the model.
+| Parameter | Unit | Valid Range | Hardware Source | Required |
+|-----------|------|------------|----------------|----------|
+| `temperature` | °C | 0 – 50 | DS18B20 / RS485 | ✅ |
+| `ph` | pH | 0 – 14 | RS485 pH probe | ✅ |
+| `nitrite` | mg/L | 0 – 20 | RS485 Nitrite channel | ✅ |
+| `phosphorus` | mg/L | 0 – 20 | RS485 Phosphorus channel | ✅ |
 
 ---
 
@@ -90,41 +79,28 @@ The request body accepts our **actual hardware sensor parameters** directly. The
 
 ```json
 {
-  "risk_level": 1,
-  "risk_label": "MEDIUM RISK",
-  "icon": "yellow",
-  "severity": "medium",
-  "confidence": 38.2,
-  "action": "Elevated risk detected. Increase aeration and reduce feeding by 30%. Test water manually. Monitor every 30 minutes.",
+  "quality_level": 0,
+  "quality_label": "EXCELLENT",
+  "icon": "green",
+  "severity": "excellent",
+  "confidence": 94.5,
+  "action": "Optimal water quality. All parameters within ideal range. Continue routine monitoring every 6 hours.",
   "probabilities": {
-    "low_risk": 28.85,
-    "medium_risk": 38.2,
-    "high_risk": 32.95
+    "excellent": 94.5,
+    "good": 4.2,
+    "poor": 1.3
   },
-  "model_inputs": {
-    "ammonia_g_ml": 0.00675,
-    "nitrate_g_ml": 0.340413,
-    "ph": 7.4,
-    "temperature_c": 26.5,
-    "turbidity_ntu": 20.0,
-    "dissolved_oxygen_g_ml": 0.008087
-  },
-  "hardware_inputs": {
-    "total_nitrogen_mg_kg": 45.0,
-    "ec_us_cm": 850.0,
-    "ph": 7.4,
-    "temperature_c": 26.5,
-    "turbidity_digital": "LOW",
-    "phosphorus_mg_kg": 12.0,
-    "potassium_mg_kg": 8.0
+  "sensor_inputs": {
+    "temperature_c": 25.0,
+    "ph": 7.2,
+    "nitrite_mg_l": 0.1,
+    "phosphorus_mg_l": 0.05
   },
   "data_quality": {
-    "do_source": "estimated (Henry Law + pH correction)",
-    "ammonia_source": "pH-adjusted TN fractionation (Boyd 1998)",
-    "nitrate_source": "blended EC + TN estimate (55% EC / 45% TN)",
-    "turbidity_source": "digital proxy (High=100 NTU, Low=20 NTU)",
-    "rolling_window_size": 1,
-    "rolling_std_active": false
+    "features_used": 10,
+    "feature_source": "4 raw RS485 readings → 10 engineered features",
+    "no_conversion": true,
+    "hardware_match": "RS485 measures exactly what model was trained on"
   },
   "validation": {
     "inputs_valid": true,
@@ -136,48 +112,32 @@ The request body accepts our **actual hardware sensor parameters** directly. The
 
 ---
 
-## Risk Levels
+## Water Quality Levels
 
-| Level | Label | Confidence Indicator | Recommended Action |
-|-------|-------|---------------------|-------------------|
-| `0` | 🟢 LOW RISK | Normal probability distribution | Routine monitoring. All parameters within safe range. |
-| `1` | 🟡 MEDIUM RISK | Elevated nutrient or pH readings | Increase aeration, reduce feeding by 30%, monitor every 30 minutes. |
-| `2` | 🔴 HIGH RISK | Critical parameter threshold exceeded | **Immediate intervention.** Stop feeding, maximum aeration, consider 20% water exchange. Alert pond manager now. |
-
-> **Note on confidence:** Low confidence (e.g. 38%) does not indicate a system fault — it means pond parameters are genuinely borderline and the model is reporting honest uncertainty. A pond with mixed signals (low nitrogen but elevated EC) will correctly produce a split probability distribution.
+| Level | Label | Meaning | Recommended Action |
+|-------|-------|---------|-------------------|
+| `0` | 🟢 EXCELLENT | Optimal conditions | Routine monitoring every 6 hours. All parameters ideal. |
+| `1` | 🟡 GOOD | Acceptable conditions | Monitor every 2–3 hours. Light aeration increase if trend worsening. |
+| `2` | 🔴 POOR | Critical deterioration | **Immediate action.** Increase aeration, reduce feeding 50%, consider 20% water exchange. Alert pond manager now. |
 
 ---
 
-## Input Validation
+## Feature Engineering
 
-Every request is validated before it reaches the model. Parameters outside physical bounds are clamped and flagged transparently:
+The model uses **10 features** built from 4 raw sensor readings:
 
-```json
-{
-  "validation": {
-    "inputs_valid": false,
-    "warnings": ["ph=99.0 is outside expected range [0.0, 14.0]. Clamped to 14.0."],
-    "values_clamped": true
-  }
-}
-```
-
-Physically impossible values (e.g. `ph > 14`) are rejected at the HTTP layer with a `422 Unprocessable Entity` response before they reach the model at all.
-
----
-
-## Hardware Conversion Layer
-
-The API bridges the gap between what our RS485 Multi-Probe measures and what the Random Forest model was trained on:
-
-| Hardware Measurement | Conversion Method | Reference |
-|---------------------|------------------|-----------|
-| Total Nitrogen → Ammonia | pH-adjusted TAN fractionation (15–25% of TN) | Boyd (1998) |
-| EC → Nitrate | Blended: 55% ionic (EC × 0.7 / 1000) + 45% TN-derived | Rhoades et al. (1989) |
-| GPIO High/Low → NTU | High = 100 NTU, Low = 20 NTU | Training data distribution |
-| DO (absent) → DO (g/ml) | Henry's Law: 14.62 − 0.3898T + 0.006969T² − 0.0000590T³ + pH correction | APHA (2017) |
-
-All conversion methods and data quality flags are returned transparently in every API response under `data_quality`.
+| Feature | Type | Biological Rationale |
+|---------|------|---------------------|
+| `Temp` | Raw | Thermal stress on fish |
+| `pH` | Raw | Chemical environment |
+| `Nitrite (mg/L)` | Raw | Primary toxicity driver (19.7% importance) |
+| `Phosphorus (mg/L)` | Raw | Nutrient load indicator |
+| `nitrite_log` | Log transform | Corrects right-skew — top feature (17.6% importance) |
+| `phosphorus_log` | Log transform | Corrects right-skew for Phosphorus |
+| `ph_nitrite_interaction` | Interaction | Un-ionised nitrite rises sharply at high pH |
+| `phosphorus_nitrite_product` | Interaction | Dual nutrient stress index |
+| `temp_ph_interaction` | Interaction | Compound thermal + chemical stress |
+| `temp_squared` | Polynomial | Non-linear thermal effects (O₂ solubility) |
 
 ---
 
@@ -187,22 +147,25 @@ All conversion methods and data quality flags are returned transparently in ever
 
 | Metric | Logistic Regression | Decision Tree | **Random Forest** |
 |--------|--------------------|--------------|--------------------|
-| Overall Accuracy | ~72% | ~93% | **97%** |
-| Macro F1 Score | 0.65 | 0.91 | **0.96** |
-| CV Mean F1 (5-fold) | 0.653 | 0.912 | **0.952** |
-| CV Standard Deviation | 0.006 | 0.003 | **0.003** |
-| Train/Test Gap | < 0.03 | < 0.02 | **< 0.01** |
-| High Risk Recall | ~0.70 | ~0.92 | **0.97** |
-| High Risk Precision | ~0.43 | ~0.90 | **0.93** |
-| High Risk F1 | ~0.54 | ~0.91 | **0.95** |
+| Overall Accuracy | 73.1% | 84.8% | **85.5%** |
+| Macro F1 Score | 0.71 | 0.84 | **0.85** |
+| CV Mean F1 (5-fold) | 0.701 | 0.842 | **0.844** |
+| CV Std Dev | 0.017 | 0.013 | **0.016** |
+| Poor Recall | 0.39 | 0.59 | **0.59** |
+| Poor Precision | 0.73 | 0.98 | **1.00** |
+| Poor F1 | 0.51 | 0.73 | **0.74** |
 
-### Published Benchmark Comparison
+### Top Feature Importances
 
-| Study | Year | Best Accuracy | Method |
-|-------|------|--------------|--------|
-| Hafeez et al., *Remote Sensing* | 2019 | 89–94% | Random Forest, water quality |
-| Zhu et al., *Ecological Indicators* | 2020 | 85–96% | RF + XGBoost, engineered labels |
-| **AquaSentinel (this project)** | 2025 | **97%** | **Random Forest, IoT aquaculture, Uganda** |
+| Rank | Feature | Importance |
+|------|---------|-----------|
+| 1 | nitrite_log | 19.71% |
+| 2 | Nitrite (mg L-1) | 17.63% |
+| 3 | ph_nitrite_interaction | 12.55% |
+| 4 | Temp | 10.05% |
+| 5 | temp_squared | 9.94% |
+
+Top 3 features account for ~50% of predictive power. Top 5 account for ~70%.
 
 ### Random Forest Configuration
 
@@ -210,25 +173,13 @@ All conversion methods and data quality flags are returned transparently in ever
 RandomForestClassifier(
     n_estimators=100,
     max_depth=8,
-    min_samples_leaf=30,
+    min_samples_leaf=20,
     max_features='sqrt',
-    class_weight='balanced',   # handles 61/26/13% imbalance without SMOTE
+    class_weight='balanced',
     random_state=42,
     n_jobs=-1
 )
 ```
-
-### Top Feature Importances
-
-| Rank | Feature | Importance | Tier |
-|------|---------|-----------|------|
-| 1 | Ammonia(g/ml) | ~13.0% | Critical |
-| 2 | ammonia_ph_interaction | ~11.8% | Critical |
-| 3 | ammonia_log | ~11.4% | Critical |
-| 4 | Nitrate(g/ml) | ~10.8% | Important |
-| 5 | ammonia_rolling_mean | ~8.5% | Important |
-
-Top 3 features account for 36% of predictive power. Top 9 account for 90%.
 
 ---
 
@@ -236,15 +187,15 @@ Top 3 features account for 36% of predictive power. Top 9 account for 90%.
 
 | Property | Value |
 |----------|-------|
-| Source | IoTPond6.csv — real IoT aquaculture pond sensors |
-| Location | Uganda |
-| Period | June – October 2021 |
-| Raw rows | 91,050 |
-| Clean rows | 89,283 |
-| Features engineered | 21 (from 6 raw sensor columns) |
-| Labels | Engineered via multi-parameter scoring function (Boyd 1998, FAO 2015) |
-| Training set | ~71,426 samples (80%) |
-| Test set | ~17,857 samples (20%) |
+| Name | Aquaculture Water Quality Dataset (AWD) |
+| Source | Mendeley Data — DOI: 10.17632/y78ty2g293.1 |
+| Citation | Veeramsetty, Arabelli, Bernatin (2024) |
+| Raw samples | 4,300 |
+| Clean samples | 3,887 (after removing 100 temperature outliers, 16 pH outliers, 300 duplicates) |
+| Features engineered | 10 (from 4 raw sensor readings) |
+| Labels | 0=Excellent (1,250) · 1=Good (1,250) · 2=Poor (1,387) |
+| Training set | 3,109 samples (80%) |
+| Test set | 778 samples (20%) |
 | Split method | Stratified by class, random_state=42 |
 
 ---
@@ -267,7 +218,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-API will be available at `http://localhost:8000`  
+API available at `http://localhost:8000`
 Interactive docs at `http://localhost:8000/docs`
 
 ---
@@ -276,13 +227,13 @@ Interactive docs at `http://localhost:8000/docs`
 
 | Layer | Technology |
 |-------|-----------|
-| ML Model | Random Forest — scikit-learn 1.6.1 |
+| ML Model | Random Forest — scikit-learn |
 | API Framework | FastAPI 0.110.0 |
 | Server | Uvicorn |
-| Database | SQLite via SQLAlchemy — persists predictions across restarts |
+| Database | SQLite via SQLAlchemy — persists across restarts |
 | Deployment | Railway via Docker |
 | Version Control | GitHub |
-| Hardware | RS485 Multi-Probe, DS18B20 temperature sensor, GPIO digital turbidity sensor |
+| Hardware | RS485 Multi-Probe (Nitrite, Phosphorus, pH), DS18B20 temperature sensor |
 
 ---
 
@@ -290,15 +241,15 @@ Interactive docs at `http://localhost:8000/docs`
 
 ```
 aquasentinel-api/
-├── main.py              # FastAPI app — endpoints, input validation, request/response models
-├── predict.py           # Hardware conversion layer + Random Forest inference
-├── database.py          # SQLAlchemy models, prediction logging, history queries
+├── main.py              # FastAPI app — endpoints, input validation
+├── predict.py           # Feature engineering + Random Forest inference
+├── database.py          # SQLAlchemy models and assessment logging
 ├── requirements.txt
 ├── Dockerfile
 └── model/
     ├── random_forest_model.pkl   # Trained Random Forest (100 trees)
     ├── scaler.pkl                # StandardScaler fitted on training data only
-    └── feature_columns.pkl       # Ordered list of 21 feature names
+    └── feature_columns.pkl       # Ordered list of 10 feature names
 ```
 
 ---
@@ -309,17 +260,14 @@ aquasentinel-api/
 // services/aquasentinel.js
 const axios = require('axios');
 
-async function predictBloomRisk(sensorData) {
+async function assessWaterQuality(sensorData) {
   const response = await axios.post(
     'https://aquasentinel-api-production.up.railway.app/api/predict',
     {
-      total_nitrogen:  sensorData.total_nitrogen,   // mg/kg
-      ec:              sensorData.ec,               // µS/cm
-      ph:              sensorData.ph,
-      temperature:     sensorData.temperature,      // °C
-      turbidity_high:  sensorData.turbidity_high,   // boolean
-      phosphorus:      sensorData.phosphorus ?? 0.0,
-      potassium:       sensorData.potassium   ?? 0.0,
+      temperature: sensorData.temperature,   // °C
+      ph:          sensorData.ph,
+      nitrite:     sensorData.nitrite,       // mg/L
+      phosphorus:  sensorData.phosphorus,    // mg/L
     }
   );
   return response.data;
@@ -330,37 +278,36 @@ async function predictBloomRisk(sensorData) {
 
 ## Changelog
 
-### v2.1.0 — Current
-- `database.py` connected — every prediction now persists to SQLite and survives container restarts
-- Input validation added — all parameters have enforced bounds; out-of-range values are clamped with warnings returned in the `validation` block of every response
-- `AMMONIA_SPIKE_THRESHOLD` corrected to `23.8816` — exact p75 of Ammonia calculated from the IoTPond6 training set (was previously hardcoded as `10.08`)
-- Rolling buffers seeded from database on startup — `rolling_std_active` is `true` immediately after a restart instead of waiting for 6 new readings
-- Error messages sanitised — internal file paths and stack traces never exposed to API callers
-- Structured logging added throughout `predict.py` and `main.py`
-- `validation` block added to every `/api/predict` response
-- Phosphorus and Potassium now stored in every database row — accumulating as the future model v2 training dataset
+### v3.0.0 — Current
+- **Complete pivot** — Water Quality Assessment replaces Algal Bloom Risk
+- New dataset: AWD (Veeramsetty et al., 2024) — 3,887 aquaculture samples
+- New parameters: Temperature, pH, Nitrite, Phosphorus (4 → direct RS485 readings)
+- New labels: Excellent / Good / Poor (replaces Low / Medium / High Risk)
+- 10 engineered features from 4 raw readings — no conversion layer needed
+- Poor Precision = 1.00 — zero false alarms on critical water quality alerts
+- Database schema updated — WaterQualityAssessment table
+
+### v2.1.0
+- database.py connected — predictions persisted across restarts
+- Input validation with Field bounds
+- AMMONIA_SPIKE_THRESHOLD corrected to 23.8816
+- Error messages sanitised
 
 ### v2.0.0
-- Hardware-aligned parameters — API now accepts RS485 hardware inputs directly
-- Hardware conversion layer introduced — TN→Ammonia, EC→Nitrate, DO estimation
-- Rolling window deque buffers replaced static `0.0` placeholders
-- `data_quality` transparency block added to every response
+- Hardware-aligned parameters — RS485 conversion layer introduced
+- Rolling window buffers for temporal features
 
 ### v1.0.0
-- Initial deployment — direct sensor parameter inputs (ammonia, nitrate, DO)
-- Random Forest model trained on 89,283 IoTPond6 readings
-- Three risk levels: LOW / MEDIUM / HIGH
+- Initial deployment — algal bloom risk prediction
+- Random Forest on IoTPond6 dataset (89,283 samples)
 
 ---
 
 ## References
 
+- Veeramsetty, V., Arabelli, R., Bernatin, T. (2024). *Aquaculture Water Quality Dataset.* Mendeley Data, V1. DOI: 10.17632/y78ty2g293.1
 - Boyd, C.E. (1998). *Water Quality in Ponds for Aquaculture.* Birmingham Publishing.
 - FAO (2015). *Aquaculture Development: Water Quality for Pond Aquaculture.*
-- Zhu, M. et al. (2020). Machine Learning for the Water Quality Evaluation. *Ecological Indicators*, 115, 106426.
-- Hafeez, S. et al. (2019). Comparison of Machine Learning Algorithms for Water Quality Predictions. *Remote Sensing*, 11(18), 2163.
-- Rhoades, J.D. et al. (1989). *Soil Salinity Assessment.* FAO Irrigation and Drainage Paper 57.
-- APHA (2017). *Standard Methods for the Examination of Water and Wastewater.* 23rd Edition.
 
 ---
 
@@ -372,6 +319,6 @@ async function predictBloomRisk(sensorData) {
 | 2 | Ezamamti Ronald Austine | S23B23/018 | B24252 |
 | 3 | Kisa Emmanuel | S23B23/028 | B24259 |
 
-**Institution:** Uganda Christian University  
-**Project:** AquaSentinel — AI-Powered Algal Bloom Risk Prediction System  
+**Institution:** Uganda Christian University
+**Project:** AquaSentinel — AI-Powered Fish Pond Water Quality Assessment
 **Year:** 2025/2026

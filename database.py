@@ -1,27 +1,24 @@
 """
-AquaSentinel — database.py  (v2.1.0)
-======================================
-SQLAlchemy models and database helpers.
+AquaSentinel — database.py  (v3.0.0)
+=====================================
+SQLAlchemy models and helpers for Water Quality Assessment.
 
-Every prediction is now persisted to SQLite so that:
+Every prediction is persisted to SQLite so that:
     - /api/history and /api/stats survive container restarts
-    - Rolling buffers can be re-seeded from real history on startup
-    - Phosphorus and Potassium readings accumulate for future model retrain
-    - All hardware and model inputs are stored for audit and debugging
+    - All sensor readings accumulate as a field deployment dataset
+    - Water quality trends are trackable over time
 
 DATABASE FILE:
-    aquasentinel.db  — created automatically in the project root on first run.
-    Railway persists this file across deploys as long as the volume is mounted.
-    To enable a persistent volume on Railway:
-        Railway dashboard → your service → Settings → Volumes
-        Mount path: /app  (or wherever your project root is)
+    aquasentinel.db — created automatically in the project root on first run.
+    For Railway persistence, mount a volume at /app in Railway settings.
 """
 
 import logging
+import json
 from datetime import datetime
 from sqlalchemy import (
-    create_engine, Column, Integer, Float, Boolean,
-    String, DateTime, Text,
+    create_engine, Column, Integer, Float,
+    String, DateTime, Boolean, Text,
 )
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
@@ -33,7 +30,7 @@ DATABASE_URL = "sqlite:///./aquasentinel.db"
 
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False},  # required for SQLite + FastAPI
+    connect_args={"check_same_thread": False},
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
@@ -43,148 +40,108 @@ Base = declarative_base()
 # DATABASE MODEL
 # ═══════════════════════════════════════════════════════════════════════════
 
-class Prediction(Base):
+class WaterQualityAssessment(Base):
     """
-    One row per API call to /api/predict.
+    One row per call to POST /api/predict.
 
-    Stores:
-        - Timestamp
-        - Raw hardware inputs exactly as received from the sensor
-        - Converted model inputs (after conversion layer)
-        - Prediction output (risk level, label, confidence)
-        - Data quality flags
+    Stores raw sensor inputs, prediction result, and confidence.
+    Each row is one water quality snapshot from the pond.
     """
-    __tablename__ = "predictions"
+    __tablename__ = "water_quality_assessments"
 
-    id          = Column(Integer, primary_key=True, index=True)
-    timestamp   = Column(DateTime, default=datetime.utcnow, index=True)
+    id           = Column(Integer, primary_key=True, index=True)
+    timestamp    = Column(DateTime, default=datetime.utcnow, index=True)
 
-    # ── Hardware inputs (RS485 + DS18B20 + GPIO) ─────────────────────
-    total_nitrogen  = Column(Float,   nullable=False)
-    ec              = Column(Float,   nullable=False)
-    ph              = Column(Float,   nullable=False)
-    temperature     = Column(Float,   nullable=False)
-    turbidity_high  = Column(Boolean, nullable=False)
-    phosphorus      = Column(Float,   default=0.0)    # logged for future retrain
-    potassium       = Column(Float,   default=0.0)    # logged for future retrain
-
-    # ── Converted model inputs (after conversion layer) ───────────────
-    ammonia_g_ml          = Column(Float, nullable=False)
-    nitrate_g_ml          = Column(Float, nullable=False)
-    turbidity_ntu         = Column(Float, nullable=False)
-    dissolved_oxygen_g_ml = Column(Float, nullable=False)
-    do_was_estimated      = Column(Boolean, default=True)
+    # ── Sensor inputs (RS485 + DS18B20) ──────────────────────────────
+    temperature  = Column(Float, nullable=False)   # °C
+    ph           = Column(Float, nullable=False)   # pH
+    nitrite      = Column(Float, nullable=False)   # mg/L
+    phosphorus   = Column(Float, nullable=False)   # mg/L
 
     # ── Prediction output ─────────────────────────────────────────────
-    risk_level    = Column(Integer, nullable=False)
-    risk_label    = Column(String,  nullable=False)
-    confidence    = Column(Float,   nullable=False)
-    prob_low      = Column(Float,   nullable=False)
-    prob_medium   = Column(Float,   nullable=False)
-    prob_high     = Column(Float,   nullable=False)
+    quality_level  = Column(Integer, nullable=False)   # 0=Excellent 1=Good 2=Poor
+    quality_label  = Column(String,  nullable=False)   # "EXCELLENT" / "GOOD" / "POOR"
+    confidence     = Column(Float,   nullable=False)   # %
+    prob_excellent = Column(Float,   nullable=False)
+    prob_good      = Column(Float,   nullable=False)
+    prob_poor      = Column(Float,   nullable=False)
 
-    # ── Validation ────────────────────────────────────────────────────
-    inputs_valid  = Column(Boolean, default=True)
-    warnings      = Column(Text,    default="")     # JSON string if any warnings
+    # ── Validation flags ──────────────────────────────────────────────
+    inputs_valid   = Column(Boolean, default=True)
+    warnings       = Column(Text,    default="")    # JSON string
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# HELPER FUNCTIONS  (called by main.py)
+# HELPER FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════
 
-def save_prediction(db, reading: dict, result: dict) -> Prediction:
+def save_prediction(db, reading: dict, result: dict) -> WaterQualityAssessment:
     """
-    Persist one prediction to the database.
+    Persist one water quality assessment to the database.
 
     Parameters
     ----------
     db      : SQLAlchemy Session
-    reading : dict — the raw SensorReading fields from the API request
-    result  : dict — the full response from predict_bloom_risk()
-
-    Returns
-    -------
-    The saved Prediction ORM object.
+    reading : dict — raw SensorReading fields from the API request
+    result  : dict — full response from predict_water_quality()
     """
-    import json
-
-    mi = result.get("model_inputs", {})
-    dq = result.get("data_quality", {})
     vl = result.get("validation",   {})
     pb = result.get("probabilities", {})
 
-    record = Prediction(
-        timestamp   = datetime.utcnow(),
-
-        # Hardware inputs
-        total_nitrogen = reading.get("total_nitrogen", 0.0),
-        ec             = reading.get("ec",             0.0),
-        ph             = reading.get("ph",             0.0),
-        temperature    = reading.get("temperature",    0.0),
-        turbidity_high = reading.get("turbidity_high", False),
-        phosphorus     = reading.get("phosphorus",     0.0),
-        potassium      = reading.get("potassium",      0.0),
-
-        # Converted model inputs
-        ammonia_g_ml          = mi.get("ammonia_g_ml",          0.0),
-        nitrate_g_ml          = mi.get("nitrate_g_ml",          0.0),
-        turbidity_ntu         = mi.get("turbidity_ntu",         0.0),
-        dissolved_oxygen_g_ml = mi.get("dissolved_oxygen_g_ml", 0.0),
-        do_was_estimated      = dq.get("do_source", "") != "sensor",
-
-        # Prediction
-        risk_level  = result.get("risk_level",  0),
-        risk_label  = result.get("risk_label",  ""),
-        confidence  = result.get("confidence",  0.0),
-        prob_low    = pb.get("low_risk",    0.0),
-        prob_medium = pb.get("medium_risk", 0.0),
-        prob_high   = pb.get("high_risk",   0.0),
-
-        # Validation
-        inputs_valid = vl.get("inputs_valid", True),
-        warnings     = json.dumps(vl.get("warnings", [])),
+    record = WaterQualityAssessment(
+        timestamp      = datetime.utcnow(),
+        temperature    = reading.get("temperature", 0.0),
+        ph             = reading.get("ph",          0.0),
+        nitrite        = reading.get("nitrite",      0.0),
+        phosphorus     = reading.get("phosphorus",   0.0),
+        quality_level  = result.get("quality_level", 0),
+        quality_label  = result.get("quality_label", ""),
+        confidence     = result.get("confidence",    0.0),
+        prob_excellent = pb.get("excellent", 0.0),
+        prob_good      = pb.get("good",      0.0),
+        prob_poor      = pb.get("poor",      0.0),
+        inputs_valid   = vl.get("inputs_valid", True),
+        warnings       = json.dumps(vl.get("warnings", [])),
     )
 
     db.add(record)
     db.commit()
     db.refresh(record)
-    logger.debug("Saved prediction id=%d  label=%s", record.id, record.risk_label)
+    logger.debug(
+        "Saved assessment id=%d  label=%s  confidence=%.1f%%",
+        record.id, record.quality_label, record.confidence,
+    )
     return record
 
 
 def get_history(db, limit: int = 50) -> list:
     """
-    Return the last N predictions, newest first.
-    Called by /api/history.
+    Return the last N assessments, newest first.
+    Called by GET /api/history.
     """
     rows = (
-        db.query(Prediction)
-        .order_by(Prediction.timestamp.desc())
+        db.query(WaterQualityAssessment)
+        .order_by(WaterQualityAssessment.timestamp.desc())
         .limit(limit)
         .all()
     )
     return [
         {
-            "id":           r.id,
-            "timestamp":    r.timestamp.isoformat(),
-            "risk_label":   r.risk_label,
-            "risk_level":   r.risk_level,
-            "confidence":   r.confidence,
-            "hardware": {
-                "total_nitrogen": r.total_nitrogen,
-                "ec":             r.ec,
-                "ph":             r.ph,
-                "temperature":    r.temperature,
-                "turbidity_high": r.turbidity_high,
-                "phosphorus":     r.phosphorus,
-                "potassium":      r.potassium,
+            "id":            r.id,
+            "timestamp":     r.timestamp.isoformat(),
+            "quality_label": r.quality_label,
+            "quality_level": r.quality_level,
+            "confidence":    r.confidence,
+            "sensor_inputs": {
+                "temperature_c":   r.temperature,
+                "ph":              r.ph,
+                "nitrite_mg_l":    r.nitrite,
+                "phosphorus_mg_l": r.phosphorus,
             },
-            "model_inputs": {
-                "ammonia_g_ml":          r.ammonia_g_ml,
-                "nitrate_g_ml":          r.nitrate_g_ml,
-                "turbidity_ntu":         r.turbidity_ntu,
-                "dissolved_oxygen_g_ml": r.dissolved_oxygen_g_ml,
-                "do_was_estimated":      r.do_was_estimated,
+            "probabilities": {
+                "excellent": r.prob_excellent,
+                "good":      r.prob_good,
+                "poor":      r.prob_poor,
             },
         }
         for r in rows
@@ -193,47 +150,22 @@ def get_history(db, limit: int = 50) -> list:
 
 def get_stats(db) -> dict:
     """
-    Return aggregated counts per risk level.
-    Called by /api/stats.
+    Return aggregated counts per water quality level.
+    Called by GET /api/stats.
     """
-    total  = db.query(Prediction).count()
-    low    = db.query(Prediction).filter(Prediction.risk_level == 0).count()
-    medium = db.query(Prediction).filter(Prediction.risk_level == 1).count()
-    high   = db.query(Prediction).filter(Prediction.risk_level == 2).count()
+    total     = db.query(WaterQualityAssessment).count()
+    excellent = db.query(WaterQualityAssessment).filter(
+        WaterQualityAssessment.quality_level == 0).count()
+    good      = db.query(WaterQualityAssessment).filter(
+        WaterQualityAssessment.quality_level == 1).count()
+    poor      = db.query(WaterQualityAssessment).filter(
+        WaterQualityAssessment.quality_level == 2).count()
 
     return {
-        "total":       total,
-        "low_risk":    low,
-        "medium_risk": medium,
-        "high_risk":   high,
-        "high_risk_pct": round(high / total * 100, 1) if total > 0 else 0.0,
+        "total":          total,
+        "excellent":      excellent,
+        "good":           good,
+        "poor":           poor,
+        "poor_pct":       round(poor / total * 100, 1) if total > 0 else 0.0,
+        "excellent_pct":  round(excellent / total * 100, 1) if total > 0 else 0.0,
     }
-
-
-def get_last_n_model_inputs(n: int = 6) -> list:
-    """
-    Return the last N converted model inputs for rolling buffer seeding.
-    Called by main.py on_startup() via seed_rolling_buffers().
-
-    Returns a list of dicts with keys:
-        ammonia_g_ml, nitrate_g_ml, temperature_c
-    ordered oldest → newest so buffers are filled in time order.
-    """
-    db   = SessionLocal()
-    rows = (
-        db.query(Prediction)
-        .order_by(Prediction.timestamp.desc())
-        .limit(n)
-        .all()
-    )
-    db.close()
-
-    # Reverse to oldest-first for correct deque insertion order
-    return [
-        {
-            "ammonia_g_ml":  r.ammonia_g_ml,
-            "nitrate_g_ml":  r.nitrate_g_ml,
-            "temperature_c": r.temperature,
-        }
-        for r in reversed(rows)
-    ]
